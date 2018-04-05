@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>HTML5 Game Template</title>
+		<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0"/>
+		<meta charset="utf-8"/>
+		<!-- Load stylesheets -->
+		<link href="css/style.css" rel="stylesheet"/>
+		<link href="css/bootstrap-responsive.min.css" rel="stylesheet"/>
+		<link href="css/bootstrap.min.css" rel="stylesheet"/>
+		<link href="css/normalize.css" rel="stylesheet"/>
+		<script src="/socket.io/socket.io.js"></script>
+	</head>
+	<body>
+		<div id="container">
+			<canvas id="canvas" width="840px" height="640px">Your browser doesn't support HTML5! Please <a href="http://www.mozilla.org">upgrade</a> your browser.</canvas>
+		</div>
+		<!-- Load scripts -->
+		<!--
+		<script src="js/engine.js"></script>
+		<script src="js/script.js"></script>
+		<script src="js/jquery1.9.1.min.js"></script>
+		<script src="js/bootstrap.min.js"></script>
+		-->
+<script>
+
+//globals
+var clientId;
+var canvas = document.getElementById('canvas');
+canvas.width = 800;
+canvas.height = 600;
+var context = canvas.getContext('2d');
+var players = null;
+var rplayers = null;
+var rplayersBuffer = [];
+
+var localPlayer = {};
+localPlayer.movement = {};
+localPlayer.input = {};
+var objectSpeed = 100;
+
+var updatesPerSecond = 5;
+var secondsPerUpdate = 1/updatesPerSecond;
+var secondsToUpdate = secondsPerUpdate;
+var updateFactor = 1;
+
+var jitterBufferSize = 3;
+var useJitterBuffer = true;
+
+var connectionComplete = false;
+var socket;
+var currentTime = Date.now();
+var serverUpdateTime = Date.now();
+
+//socket handlers set up when connecting
+function connectToServer()
+{
+	socket = io();
+
+	socket.on('message', function(data){
+		console.log(data);
+	});
+
+	socket.on('new player ack', function(newPlayerInfo) {
+		console.log("server handshook");
+		clientId = newPlayerInfo.Id;
+		//initial movement values
+		localPlayer.movement.position = newPlayerInfo.position;//newPlayerInfo.position;
+		localPlayer.movement.direction = {x: 0,y: 0};//newPlayerInfo.direction;
+		localPlayer.movement.velocity = 0;//newPlayerInfo.velocity;
+		localPlayer.input.up = false;
+		localPlayer.input.down = false;
+		localPlayer.input.left = false;
+		localPlayer.input.right = false;
+		localPlayer.input.position = newPlayerInfo.position;
+		localPlayer.input.warp = false;
+		socket.emit('new player ready');
+	});
+	
+	socket.on('new player ready ack', function(){
+		//begin sending updates to the server
+		setInterval(function() {
+			localPlayer.input.position = localPlayer.movement.position;	
+			socket.emit('input', localPlayer.input);
+		}, 1000 / updatesPerSecond);
+		
+		//begin processing updates from the server
+		setTimeout(function(){
+			clientListServerUpdate()
+		}, 1000 / updatesPerSecond);
+	});
+
+	socket.on('state', function(splayers) {		
+		rplayersBuffer.push(splayers);
+		//var newTime = Date.now();
+		//serverUpdateTime = (newTime - serverUpdateTime)/1000;
+		//console.log("secondsPerUpdate - should be"+secondsPerUpdate+" but actually is: "+serverUpdateTime);
+		//serverUpdateTime = newTime;
+	});
+
+	socket.emit('new player');//server should respond with 'new player ack'
+};
+
+//input handlers
+var left=false;
+var up = false;
+var right = false;
+var down = false;
+var onetime = true;
+document.addEventListener('keydown', function(event) {
+	switch (event.keyCode) {
+	case 65: // A
+	  localPlayer.input.left = true;
+	  break;
+	case 87: // W
+	  localPlayer.input.up = true;
+	  break;
+	case 68: // D
+	  localPlayer.input.right = true;
+	  break;
+	case 83: // S
+	  localPlayer.input.down = true;
+	  break;
+	}
+	updateMovement(localPlayer, true);//apply input to local client movement
+});
+
+document.addEventListener('keyup', function(event) {
+	switch (event.keyCode) {
+	case 65: // A
+	  localPlayer.input.left = false;
+	  break;
+	case 87: // W
+	  localPlayer.input.up = false;
+	  break;
+	case 68: // D
+	  localPlayer.input.right = false;
+	  break;
+	case 83: // S
+	  localPlayer.input.down = false;
+	  break;
+	}
+	updateMovement(localPlayer, true);//apply input to local client movement
+});
+
+function updateMovement(aPlayer, localUpdate)//apply input to movement
+{
+	//read from input write to movement
+	var input = aPlayer.input;
+	var movement;
+	if(localUpdate)//applying local input to local client
+	{
+		movement = aPlayer.movement;
+	}
+	else
+	{
+		movement = {};
+		movement.direction = {x: 0,y: 0};
+		movement.position = input.position;
+	}	
+	
+	if(input.left || input.up || input.right || input.down)
+	{
+		movement.direction.x=0;
+		movement.direction.y=0;
+		movement.velocity = objectSpeed;		
+		if(input.left)
+		{
+			if(input.right)
+				movement.direction.x = 0;
+			else
+				movement.direction.x = -1;
+		}
+		else if(input.right)
+		{
+			movement.direction.x = 1;
+		}
+		if(input.up)
+		{
+			if(input.down)
+				movement.direction.y = 0;
+			else
+				movement.direction.y = -1;
+		}
+		else if(input.down)
+		{
+			movement.direction.y = 1;
+		}
+	}
+	else
+		movement.velocity = 0;
+	
+	if(!localUpdate)
+		aPlayer.movement = movement;
+}
+
+function updatePlayer(deltaTime, player, id)
+{
+	if(player!=localPlayer)
+	{
+		//console.log("server update3");
+		//console.log(player.input.previousPosition);
+		player.input.interpTime = player.input.interpTime+deltaTime;
+		//console.log((player.input.interpTime/secondsPerUpdate));
+		player.movement.position.x =  player.input.previousPosition.x + (player.input.interpTime/secondsToUpdate)*(player.input.finalPosition.x - player.input.previousPosition.x);
+		player.movement.position.y =  player.input.previousPosition.y + (player.input.interpTime/secondsToUpdate)*(player.input.finalPosition.y - player.input.previousPosition.y);
+		
+	}
+	else
+	{
+		player.movement.position.x+=player.movement.direction.x*player.movement.velocity*deltaTime;
+		player.movement.position.y+=player.movement.direction.y*player.movement.velocity*deltaTime;
+	}
+	
+}
+
+function ptdist(pos1, pos2)
+{
+	return Math.sqrt(Math.pow((pos1.x-pos2.x),2) + Math.pow((pos1.y-pos2.y),2));
+}
+
+function clientListServerUpdate()
+{
+	var rPlayer, aPlayer, dist;
+	//compare server position to local position
+	//if they're too different, start the warp
+	//console.log("am i gtting here")
+	
+	if(players!=null)//dont bother on first update
+	{
+		if(rplayersBuffer.length==0)
+			return;
+			
+		rplayers = rplayersBuffer.shift();
+		
+		for (var id in rplayers)
+		{
+			if(id in players && id!=clientId)//make sure we have a previous state for this client
+			{
+				//console.log("getting here");
+				rPlayer = rplayers[id];
+				aPlayer = players[id];
+								
+				rPlayer.input.previousPosition = {
+					x:aPlayer.movement.position.x,
+					y:aPlayer.movement.position.y
+				};
+				
+				rPlayer.input.finalPosition = {
+					x:rPlayer.input.position.x,
+					y:rPlayer.input.position.y
+				};
+				
+				rPlayer.input.interpTime = 0;
+				
+				rPlayer.interpolating = true;
+								
+				//console.log(players);
+			}
+			else if(id!=clientId)//first update for new client
+			{
+				rPlayer = rplayers[id];
+				rPlayer.input.previousPosition = rPlayer.input.position;
+				rPlayer.input.finalPosition = rPlayer.input.position;
+				rPlayer.input.interpTime = 0;
+				rPlayer.interpolating = false;
+				console.log("new player entry");
+			}
+		}
+		//console.log("one");
+		players = rplayers;
+		
+		if(false)//useJitterBuffer)
+		{
+			updateFactor = jitterBufferSize/rplayersBuffer.length;
+			secondsToUpdate = secondsPerUpdate*updateFactor;
+		}
+		else
+			secondsToUpdate = secondsPerUpdate;
+			
+		setTimeout(clientListServerUpdate, 1000 * secondsToUpdate);
+	}
+	else
+	{
+		if(useJitterBuffer)
+		{
+			if(rplayersBuffer.length <= jitterBufferSize)//still filling jitter buffer, return and quickly try again
+			{
+				setTimeout(clientListServerUpdate,10);			
+				return;
+			}
+		
+		}
+		else if(rplayersBuffer.length==0)//havent gotten any new updates yet
+		{
+			setTimeout(clientListServerUpdate,10);			
+			return;
+		}
+			
+		rplayers = rplayersBuffer.pop();
+		//first update for all clients
+		//treat all as a first object update
+		//start interpolating on next update
+		for (var id in rplayers)
+		{
+			rPlayer = rplayers[id];
+			rPlayer.input.previousPosition = rPlayer.input.position;
+			rPlayer.input.finalPosition = rPlayer.input.position;
+			rPlayer.input.interpTime = 0;
+			rPlayer.interpolating = false;
+		}
+		players = rplayers;
+		console.log("first server update");
+		console.log(players);
+		
+		setTimeout(clientListServerUpdate, 1000 * secondsToUpdate);
+	}
+	
+	
+	//apply input to movement for remote clients
+	
+	for (var id in players)
+	{
+		player = players[id];
+		//update movement for remote clients
+		if(id!=clientId)
+		{
+			 updateMovement(player, false);
+		}
+	}
+	//console.log("server update2");
+}
+
+function updatePlayers(timedelta)
+{
+	var player;
+	if(players!=null)
+	{
+		timedelta = timedelta/1000;
+		for (var id in players)
+		{
+			player = players[id];
+			if(id!=clientId)
+			{
+				//console.log("player update");
+				//console.log(player);
+				if(player.input.previousPosition)
+					updatePlayer(timedelta, player, id);
+				else
+					console.log("how many times do I show?");
+			}
+			else
+			{	
+				updatePlayer(timedelta, localPlayer);
+				//sync local client position with next outgoing server update
+				localPlayer.input.position = localPlayer.movement.position;				
+			}
+		}
+	}
+}
+
+function render()
+{
+	if(players!=null)
+	{
+	  var newTime = Date.now();
+	  //console.log("time step: ");
+	  //console.log(newTime - currentTime);
+	  updatePlayers(newTime - currentTime);
+	  currentTime = newTime;
+	  context.clearRect(0, 0, 800, 600);
+	  context.fillStyle = 'green';
+	  //console.log('rendering');
+	  for (var id in players) {
+		var player = players[id];
+		//console.log(player);
+		context.beginPath();
+		if(id!=clientId)
+		{
+			//console.log("getting here");
+			context.arc(player.movement.position.x, player.movement.position.y, 10, 0, 2 * Math.PI);
+		}
+		else
+			context.arc(localPlayer.movement.position.x, localPlayer.movement.position.y, 10, 0, 2 * Math.PI);
+		//console.log("rendering at: "+movement.position.x+" "+movement.position.y);
+		context.fill();
+	  }
+  }
+  requestAnimationFrame(render);
+}
+
+function start()
+{
+	//create the connection and set up message handlers
+	connectToServer();
+	
+	requestAnimationFrame(render);	
+}
+
+start();
+		</script>
+	</body>
+</html>
